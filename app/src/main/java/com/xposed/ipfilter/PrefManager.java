@@ -42,7 +42,7 @@ public class PrefManager {
     private final File configFile;
     private Set<String> whitelist;
     private String source = "default"; // "file" | "sp" | "default"
-    private long lastLoadedTimestamp = 0; // 记录上次加载时的文件修改时间
+    private long lastLoadedTimestamp = 0;
 
     public PrefManager(SharedPreferences prefs, File filesDir) {
         this.prefs = prefs;
@@ -51,16 +51,34 @@ public class PrefManager {
         reload();
     }
 
-    /** 重新加载白名单 — 现在强制走默认值，忽略文件/SP残留 */
+    /** 重新加载白名单 — 文件 > SP > 默认值 */
     public void reload() {
-        // 强制始终使用默认值，避免旧版SP残留导致白名单不对
-        Set<String> loaded = parseItems(DEFAULT_WHITELIST);
+        // 1. 优先读文件
+        Set<String> loaded = loadFromFile();
+        if (loaded != null && !loaded.isEmpty()) {
+            whitelist = Collections.synchronizedSet(loaded);
+            source = "file";
+            LogWriter.i("PrefManager: loaded from file, " + loaded.size() + " items");
+            return;
+        }
+
+        // 2. 文件不存在或空，回退到 SP
+        loaded = loadFromPreferences();
+        if (loaded != null && !loaded.isEmpty()) {
+            whitelist = Collections.synchronizedSet(loaded);
+            source = "sp";
+            saveToFile(loaded);
+            LogWriter.i("PrefManager: loaded from SP, " + loaded.size() + " items, synced to file");
+            return;
+        }
+
+        // 3. 两者都没有，用内置默认值，并写入文件和 SP
+        loaded = parseItems(DEFAULT_WHITELIST);
         whitelist = Collections.synchronizedSet(loaded);
         source = "default";
-        // 覆盖写入SP和文件，确保两端一致
         saveToPreferences(loaded);
         saveToFile(loaded);
-        LogWriter.i("PrefManager: forced defaults, " + loaded.size() + " items (ignored old file/SP)");
+        LogWriter.i("PrefManager: using defaults, " + loaded.size() + " items, written to file & SP");
     }
 
     /** 检查IP是否在白名单 */
@@ -112,14 +130,11 @@ public class PrefManager {
         }
     }
 
-    /**
-     * 仅在文件修改后才重新加载（避免频繁 I/O）
-     */
     private Set<String> tryLoadFromFileIfChanged() {
         if (!configFile.exists()) return null;
         long lastModified = configFile.lastModified();
         if (lastModified == lastLoadedTimestamp) {
-            return null; // 文件未变化
+            return null;
         }
         Set<String> loaded = loadFromFile();
         if (loaded != null && !loaded.isEmpty()) {
@@ -138,7 +153,6 @@ public class PrefManager {
                 String line;
                 boolean firstLine = true;
                 while ((line = reader.readLine()) != null) {
-                    // 跳过 UTF-8 BOM（\uFEFF 可能出现在第一行开头）
                     if (firstLine) {
                         line = stripBOM(line);
                         firstLine = false;
@@ -154,7 +168,6 @@ public class PrefManager {
         }
     }
 
-    /** 移除字符串开头的 BOM（\uFEFF） */
     private static String stripBOM(String s) {
         if (s != null && !s.isEmpty() && s.charAt(0) == '\uFEFF') {
             return s.substring(1);
